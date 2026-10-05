@@ -1,0 +1,315 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+//@version=6
+
+strategy("Triple HTF Bollinger Bands Strategy 5m 15m 1h", overlay = true, pyramiding = 0, initial_capital = 1000000, default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = true, max_labels_count = 50)
+
+// --- HTF Timeframes ---
+
+string groupTf = "HTF Timeframes"
+
+bool showTf1Input = input.bool(true, "Show HTF 1", group = groupTf, tooltip = "Show the first set of Bollinger Bands. Does not affect trade signals.")
+
+string tf1Input = input.timeframe("5", "HTF 1", group = groupTf, tooltip = "First Bollinger timeframe; default 5 minutes.")
+
+bool showTf2Input = input.bool(true, "Show HTF 2", group = groupTf, tooltip = "Show the second set of Bollinger Bands. Does not affect trade signals.")
+
+string tf2Input = input.timeframe("15", "HTF 2", group = groupTf, tooltip = "Second Bollinger timeframe; default 15 minutes.")
+
+bool showTf3Input = input.bool(true, "Show HTF 3", group = groupTf, tooltip = "Show the third set of Bollinger Bands. Does not affect trade signals.")
+
+string tf3Input = input.timeframe("60", "HTF 3", group = groupTf, tooltip = "Third Bollinger timeframe; default 1 hour.")
+
+// --- Bollinger Settings ---
+
+string groupBb = "Bollinger Bands"
+
+float srcInput = input.source(close, "Source", group = groupBb, tooltip = "Price series used to calculate all Bollinger Bands.")
+
+int lenInput = input.int(20, "Length", minval = 1, group = groupBb, tooltip = "Number of bars on each higher timeframe used to calculate the bands.")
+
+float multInput = input.float(2.0, "Deviation", minval = 0.1, step = 0.1, group = groupBb, tooltip = "Standard-deviation multiplier for the upper and lower bands.")
+
+// --- Trading Settings ---
+
+string groupTrade = "Trading / Risk"
+
+string stopTfInput = input.string("HTF 1 (5m)", "SL Basis", options = ["HTF 1 (5m)", "HTF 2 (15m)", "HTF 3 (1h)"], group = groupTrade, tooltip = "Select which timeframe's Bollinger basis supplies the stop-loss level. The names reflect default timeframes; changing timeframe inputs also changes the chosen basis.")
+
+string stopModeInput = input.string("Fixed at entry", "SL Mode", options = ["Dynamic", "Fixed at entry"], group = groupTrade, tooltip = "Dynamic follows the selected confirmed HTF basis while the trade is open; Fixed at entry keeps the basis from the signal candle. TP always uses the initial risk.")
+
+string rewardInput = input.string("1R", "Take Profit", options = ["0.6R", "1R", "1.2R", "1.5R"], group = groupTrade, tooltip = "Target multiple of the entry-to-initial-basis distance. TP is locked to each trade's actual entry price.")
+
+int cooldownBarsInput = input.int(10, "Cooldown after exit (candles)", minval = 0, group = groupTrade, tooltip = "Wait this many complete chart candles after a position closes before allowing another entry. Set to 0 to allow entry on the next candle.")
+
+// --- Entry Sessions ---
+
+string groupSessions = "Entry Sessions (New York time)"
+
+string timezoneInput = input.string("America/New_York", "Session Time Zone", group = groupSessions, tooltip = "IANA time zone for the session windows. Default: New York time, including daylight saving changes.")
+
+bool asiaInput = input.bool(false, "Asia 18:00–02:00", group = groupSessions, tooltip = "Allow new positions from 18:00 up to but excluding 02:00.")
+
+bool londonInput = input.bool(false, "London 02:00–08:00", group = groupSessions, tooltip = "Allow new positions from 02:00 up to but excluding 08:00.")
+
+bool nyAmInput = input.bool(true, "NY AM 08:00–12:00", group = groupSessions, tooltip = "Allow new positions from 08:00 up to but excluding 12:00.")
+
+bool nyPmInput = input.bool(false, "NY PM 12:00–16:00", group = groupSessions, tooltip = "Allow new positions from 12:00 up to but excluding 16:00. No new trades between 16:00 and 18:00.")
+
+// --- Display ---
+
+string groupDisplay = "Display"
+
+bool showBasisInput = input.bool(true, "Show Basis", group = groupDisplay, tooltip = "Show the middle line of each visible Bollinger set.")
+
+bool showLabelsInput = input.bool(true, "Show Labels", group = groupDisplay, tooltip = "Show labels for the last bar's visible band levels.")
+
+int labelOffsetInput = input.int(3, "Label Offset", minval = 0, maxval = 50, group = groupDisplay, tooltip = "Number of bars to the right for the last-value labels.")
+
+int outerWidthInput = input.int(1, "Upper / Lower Width", minval = 1, maxval = 4, group = groupDisplay, tooltip = "Width of upper and lower band lines.")
+
+int basisWidthInput = input.int(2, "Basis Width", minval = 1, maxval = 4, group = groupDisplay, tooltip = "Width of basis lines.")
+
+string lineStyleInput = input.string("Line", "Line Style", options = ["Line", "Stepline"], group = groupDisplay, tooltip = "Drawing style for all band lines.")
+
+bool showFillInput = input.bool(false, "Fill Bands", group = groupDisplay, tooltip = "Tint the area between each set's upper and lower bands.")
+
+int fillTranspInput = input.int(92, "Fill Transparency", minval = 0, maxval = 100, group = groupDisplay, tooltip = "Transparency of the Bollinger band fill.")
+
+bool showExtremeBgInput = input.bool(true, "Show Extreme Background", group = groupDisplay, tooltip = "Paint red for close above at least two upper bands; green for close below at least two lower bands. Hiding the background does not disable trades.")
+
+int doubleBgTranspInput = input.int(88, "2 HTF Background Transparency", minval = 0, maxval = 100, group = groupDisplay, tooltip = "Transparency when the close exceeds exactly two bands.")
+
+int tripleBgTranspInput = input.int(72, "3 HTF Background Transparency", minval = 0, maxval = 100, group = groupDisplay, tooltip = "Transparency when the close exceeds all three bands.")
+
+bool showTripleMarkerInput = input.bool(true, "Show 3 HTF Marker", group = groupDisplay, tooltip = "Mark the first bar closing outside all three bands.")
+
+// --- Style ---
+
+string groupStyle = "Style"
+
+color tf1ColorInput = input.color(color.rgb(41, 98, 255), "HTF 1 Color", group = groupStyle, tooltip = "Color of HTF 1 bands and labels.")
+
+color tf2ColorInput = input.color(color.rgb(255, 152, 0), "HTF 2 Color", group = groupStyle, tooltip = "Color of HTF 2 bands and labels.")
+
+color tf3ColorInput = input.color(color.rgb(156, 39, 176), "HTF 3 Color", group = groupStyle, tooltip = "Color of HTF 3 bands and labels.")
+
+color upperColorInput = input.color(#f23645, "Upper Extreme Color", group = groupStyle, tooltip = "Color for red-background long signals.")
+
+color lowerColorInput = input.color(#089981, "Lower Extreme Color", group = groupStyle, tooltip = "Color for green-background short signals.")
+
+// --- Functions ---
+
+f_confirmedBb(float price, int length, float deviation) =>
+
+    float basis = ta.sma(price, length)
+
+    float bandDev = ta.stdev(price, length) * deviation
+
+    [basis[1], (basis + bandDev)[1], (basis - bandDev)[1]]
+
+f_tfText(string tf) =>
+
+    int seconds = timeframe.in_seconds(tf)
+
+    seconds < 3600 ? str.tostring(int(seconds / 60)) + "m" : seconds < 86400 ? str.tostring(int(seconds / 3600)) + "H" : tf
+
+f_addLabel(array<label> ids, float level, string caption, color textColor, int xOffset) =>
+
+    if not na(level)
+
+        array.push(ids, label.new(bar_index + xOffset, level, caption, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = textColor, size = size.small))
+
+// --- Confirmed HTF Data ---
+
+if barstate.isfirst and (timeframe.in_seconds(tf1Input) < timeframe.in_seconds() or timeframe.in_seconds(tf2Input) < timeframe.in_seconds() or timeframe.in_seconds(tf3Input) < timeframe.in_seconds())
+
+    runtime.error("Set the chart timeframe to no more than the smallest HTF. All three HTFs must be at least as large as the chart timeframe.")
+
+[basis1, upper1, lower1] = request.security(syminfo.tickerid, tf1Input, f_confirmedBb(srcInput, lenInput, multInput), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+[basis2, upper2, lower2] = request.security(syminfo.tickerid, tf2Input, f_confirmedBb(srcInput, lenInput, multInput), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+[basis3, upper3, lower3] = request.security(syminfo.tickerid, tf3Input, f_confirmedBb(srcInput, lenInput, multInput), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+// --- Close-Based Extreme Signals ---
+
+int upperCount = (not na(upper1) and close > upper1 ? 1 : 0) + (not na(upper2) and close > upper2 ? 1 : 0) + (not na(upper3) and close > upper3 ? 1 : 0)
+
+int lowerCount = (not na(lower1) and close < lower1 ? 1 : 0) + (not na(lower2) and close < lower2 ? 1 : 0) + (not na(lower3) and close < lower3 ? 1 : 0)
+
+bool aboveTwo = upperCount >= 2
+
+bool belowTwo = lowerCount >= 2
+
+float chosenBasis = stopTfInput == "HTF 1 (5m)" ? basis1 : stopTfInput == "HTF 2 (15m)" ? basis2 : basis3
+
+float rr = rewardInput == "0.6R" ? 0.6 : rewardInput == "1R" ? 1.0 : rewardInput == "1.2R" ? 1.2 : 1.5
+
+// Determine sessions by the signal candle's close in the selected time zone.
+
+int closeMinutes = hour(time_close, timezoneInput) * 60 + minute(time_close, timezoneInput)
+
+bool inAsia = closeMinutes >= 18 * 60 or closeMinutes < 2 * 60
+
+bool inLondon = closeMinutes >= 2 * 60 and closeMinutes < 8 * 60
+
+bool inNyAm = closeMinutes >= 8 * 60 and closeMinutes < 12 * 60
+
+bool inNyPm = closeMinutes >= 12 * 60 and closeMinutes < 16 * 60
+
+bool entrySession = (asiaInput and inAsia) or (londonInput and inLondon) or (nyAmInput and inNyAm) or (nyPmInput and inNyPm)
+
+// --- Strategy Orders ---
+
+// The signal candle's confirmed basis defines initial R. The TP is recalculated
+
+// using the actual filled entry price on subsequent bars, then remains fixed.
+
+var float initialStop = na
+
+var float activeStop = na
+
+var float targetPrice = na
+
+int lastExitBar = strategy.closedtrades > 0 ? strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) : na
+
+bool cooldownOver = na(lastExitBar) or bar_index - lastExitBar > cooldownBarsInput
+
+bool canEnter = barstate.isconfirmed and entrySession and strategy.position_size == 0 and cooldownOver and not na(chosenBasis)
+
+bool longSignal = canEnter and aboveTwo and close > chosenBasis + syminfo.mintick
+
+bool shortSignal = canEnter and belowTwo and close < chosenBasis - syminfo.mintick
+
+if longSignal
+
+    initialStop := chosenBasis
+
+    activeStop := initialStop
+
+    targetPrice := close + (close - initialStop) * rr
+
+    strategy.entry("Long", strategy.long)
+
+    strategy.exit("Long SL / TP", from_entry = "Long", stop = activeStop, limit = targetPrice)
+
+else if shortSignal
+
+    initialStop := chosenBasis
+
+    activeStop := initialStop
+
+    targetPrice := close - (initialStop - close) * rr
+
+    strategy.entry("Short", strategy.short)
+
+    strategy.exit("Short SL / TP", from_entry = "Short", stop = activeStop, limit = targetPrice)
+
+if strategy.position_size > 0 and not na(initialStop)
+
+    activeStop := stopModeInput == "Dynamic" and not na(chosenBasis) ? chosenBasis : initialStop
+
+    targetPrice := strategy.position_avg_price + (strategy.position_avg_price - initialStop) * rr
+
+    strategy.exit("Long SL / TP", from_entry = "Long", stop = activeStop, limit = targetPrice)
+
+else if strategy.position_size < 0 and not na(initialStop)
+
+    activeStop := stopModeInput == "Dynamic" and not na(chosenBasis) ? chosenBasis : initialStop
+
+    targetPrice := strategy.position_avg_price - (initialStop - strategy.position_avg_price) * rr
+
+    strategy.exit("Short SL / TP", from_entry = "Short", stop = activeStop, limit = targetPrice)
+
+// --- Band Plots ---
+
+plotStyle = lineStyleInput == "Stepline" ? plot.style_stepline : plot.style_line
+
+p1Upper = plot(showTf1Input ? upper1 : na, "HTF 1 Upper", color = tf1ColorInput, linewidth = outerWidthInput, style = plotStyle)
+
+p1Basis = plot(showTf1Input and showBasisInput ? basis1 : na, "HTF 1 Basis", color = tf1ColorInput, linewidth = basisWidthInput, style = plotStyle)
+
+p1Lower = plot(showTf1Input ? lower1 : na, "HTF 1 Lower", color = tf1ColorInput, linewidth = outerWidthInput, style = plotStyle)
+
+p2Upper = plot(showTf2Input ? upper2 : na, "HTF 2 Upper", color = tf2ColorInput, linewidth = outerWidthInput, style = plotStyle)
+
+p2Basis = plot(showTf2Input and showBasisInput ? basis2 : na, "HTF 2 Basis", color = tf2ColorInput, linewidth = basisWidthInput, style = plotStyle)
+
+p2Lower = plot(showTf2Input ? lower2 : na, "HTF 2 Lower", color = tf2ColorInput, linewidth = outerWidthInput, style = plotStyle)
+
+p3Upper = plot(showTf3Input ? upper3 : na, "HTF 3 Upper", color = tf3ColorInput, linewidth = outerWidthInput, style = plotStyle)
+
+p3Basis = plot(showTf3Input and showBasisInput ? basis3 : na, "HTF 3 Basis", color = tf3ColorInput, linewidth = basisWidthInput, style = plotStyle)
+
+p3Lower = plot(showTf3Input ? lower3 : na, "HTF 3 Lower", color = tf3ColorInput, linewidth = outerWidthInput, style = plotStyle)
+
+fill(p1Upper, p1Lower, title = "HTF 1 Fill", color = showFillInput and showTf1Input ? color.new(tf1ColorInput, fillTranspInput) : na)
+
+fill(p2Upper, p2Lower, title = "HTF 2 Fill", color = showFillInput and showTf2Input ? color.new(tf2ColorInput, fillTranspInput) : na)
+
+fill(p3Upper, p3Lower, title = "HTF 3 Fill", color = showFillInput and showTf3Input ? color.new(tf3ColorInput, fillTranspInput) : na)
+
+color extremeBg = upperCount == 3 ? color.new(upperColorInput, tripleBgTranspInput) : lowerCount == 3 ? color.new(lowerColorInput, tripleBgTranspInput) : aboveTwo ? color.new(upperColorInput, doubleBgTranspInput) : belowTwo ? color.new(lowerColorInput, doubleBgTranspInput) : na
+
+bgcolor(showExtremeBgInput ? extremeBg : na, title = "HTF Bollinger Extreme")
+
+plotshape(showTripleMarkerInput and upperCount == 3 and upperCount[1] != 3, title = "3 HTF Upper Extreme", style = shape.labeldown, location = location.abovebar, color = upperColorInput, text = "3× HTF", textcolor = chart.fg_color, size = size.tiny)
+
+plotshape(showTripleMarkerInput and lowerCount == 3 and lowerCount[1] != 3, title = "3 HTF Lower Extreme", style = shape.labelup, location = location.belowbar, color = lowerColorInput, text = "3× HTF", textcolor = chart.fg_color, size = size.tiny)
+
+plot(strategy.position_size != 0 ? activeStop : na, "Active Stop", color = #f23645, linewidth = 2, style = plot.style_linebr)
+
+plot(strategy.position_size != 0 ? targetPrice : na, "Active Target", color = #089981, linewidth = 2, style = plot.style_linebr)
+
+// --- Last-Bar Band Labels ---
+
+var array<label> bandLabels = array.new<label>()
+
+if barstate.islast
+
+    if array.size(bandLabels) > 0
+
+        for oldLabel in bandLabels
+
+            label.delete(oldLabel)
+
+        array.clear(bandLabels)
+
+    if showLabelsInput
+
+        if showTf1Input
+
+            string name1 = f_tfText(tf1Input)
+
+            f_addLabel(bandLabels, upper1, "Upper " + name1, tf1ColorInput, labelOffsetInput)
+
+            if showBasisInput
+
+                f_addLabel(bandLabels, basis1, "Basis " + name1, tf1ColorInput, labelOffsetInput)
+
+            f_addLabel(bandLabels, lower1, "Lower " + name1, tf1ColorInput, labelOffsetInput)
+
+        if showTf2Input
+
+            string name2 = f_tfText(tf2Input)
+
+            f_addLabel(bandLabels, upper2, "Upper " + name2, tf2ColorInput, labelOffsetInput)
+
+            if showBasisInput
+
+                f_addLabel(bandLabels, basis2, "Basis " + name2, tf2ColorInput, labelOffsetInput)
+
+            f_addLabel(bandLabels, lower2, "Lower " + name2, tf2ColorInput, labelOffsetInput)
+
+        if showTf3Input
+
+            string name3 = f_tfText(tf3Input)
+
+            f_addLabel(bandLabels, upper3, "Upper " + name3, tf3ColorInput, labelOffsetInput)
+
+            if showBasisInput
+
+                f_addLabel(bandLabels, basis3, "Basis " + name3, tf3ColorInput, labelOffsetInput)
+
+            f_addLabel(bandLabels, lower3, "Lower " + name3, tf3ColorInput, labelOffsetInput)
